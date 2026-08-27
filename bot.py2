@@ -1,0 +1,197 @@
+"""
+Risk Taker Sports Co. — Telegram sales bot
+-------------------------------------------
+Replicates the LuBot-style flow from the screenshot:
+  /start -> welcome message + menu buttons
+  each button -> short pitch for that category
+  Subscribe -> pricing + Cash App payment info
+  "I've Paid" -> pings the admin so a human can verify and
+                 manually add the buyer to the private picks group/channel.
+
+No picks are ever generated or sent automatically — you post those
+yourself once someone's confirmed as paid. This bot only handles the
+welcome/menu/sales funnel, same as the "I post them manually" setup.
+"""
+
+import logging
+import os
+
+from dotenv import load_dotenv
+from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
+from telegram.constants import ParseMode
+from telegram.ext import (
+    Application,
+    CallbackQueryHandler,
+    CommandHandler,
+    ContextTypes,
+)
+
+load_dotenv()
+
+BOT_TOKEN = os.environ["BOT_TOKEN"]
+ADMIN_CHAT_ID = os.environ["ADMIN_CHAT_ID"]
+
+BRAND_NAME = os.environ.get("BRAND_NAME", "Risk Taker Sports Co.")
+CASHAPP_HANDLE = os.environ.get("CASHAPP_HANDLE", "$YourCashtag")
+DAILY_PRICE = os.environ.get("DAILY_PRICE", "$10/day")
+WEEKLY_PRICE = os.environ.get("WEEKLY_PRICE", "$50/week")
+MONTHLY_PRICE = os.environ.get("MONTHLY_PRICE", "$150/month")
+DISCORD_LINK = os.environ.get("DISCORD_LINK", "https://discord.gg/your-invite")
+
+logging.basicConfig(
+    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
+    level=logging.INFO,
+)
+logger = logging.getLogger(__name__)
+
+CATEGORIES = {
+    "tennis": {
+        "label": "🎾 Tennis",
+        "text": (
+            "*🎾 Tennis Plays*\n\n"
+            "Daily ATP/WTA breakdowns — ranking gaps, surface splits, recent "
+            "form, and head-to-head trends. This is the core of the page."
+        ),
+    },
+    "mlb": {
+        "label": "⚾ MLB",
+        "text": (
+            "*⚾ MLB Plays*\n\n"
+            "Pitching matchups, bullpen usage, and situational spots — "
+            "moneylines, run lines, and player props."
+        ),
+    },
+    "nba": {
+        "label": "🏀 NBA",
+        "text": (
+            "*🏀 NBA Plays*\n\n"
+            "Matchup-based reads on spreads, totals, and player props."
+        ),
+    },
+    "lock": {
+        "label": "🔒 Lock of the Day",
+        "text": (
+            "*🔒 Lock of the Day*\n\n"
+            "One highest-conviction play per day across all sports covered. "
+            "Posted to subscribers once it's finalized."
+        ),
+    },
+    "parlays": {
+        "label": "📈 Top Plays & Parlays",
+        "text": (
+            "*📈 Top Plays & Parlays*\n\n"
+            "A short combined list of the day's best individual plays, plus "
+            "an optional parlay build for anyone who wants to stack them."
+        ),
+    },
+}
+
+WELCOME_TEXT = (
+    f"*Welcome to {BRAND_NAME}* 🎯\n\n"
+    "We do the homework. You get the plays.\n\n"
+    "Pick a category below to see what's covered, or hit *Subscribe* to "
+    "get today's picks.\n\n"
+    f"🔥 Starting at *{DAILY_PRICE}* 🔥"
+)
+
+SUBSCRIBE_TEXT = (
+    "*Subscribe*\n\n"
+    f"• Daily — {DAILY_PRICE}\n"
+    f"• Weekly — {WEEKLY_PRICE}\n"
+    f"• Monthly — {MONTHLY_PRICE}\n\n"
+    "*How to pay:*\n"
+    f"Cash App: `{CASHAPP_HANDLE}`\n\n"
+    "Put your Telegram @username in the payment note, then tap "
+    "*I've Paid* below — you'll be added to the private picks group "
+    "once it's confirmed."
+)
+
+
+def main_menu_keyboard() -> InlineKeyboardMarkup:
+    rows = [[InlineKeyboardButton(v["label"], callback_data=f"cat:{k}")] for k, v in CATEGORIES.items()]
+    rows.append([InlineKeyboardButton("💰 Subscribe", callback_data="subscribe")])
+    rows.append([InlineKeyboardButton("💬 Free Discord", url=DISCORD_LINK)])
+    return InlineKeyboardMarkup(rows)
+
+
+def category_keyboard() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        [
+            [InlineKeyboardButton("💰 Subscribe", callback_data="subscribe")],
+            [InlineKeyboardButton("⬅️ Back", callback_data="menu")],
+        ]
+    )
+
+
+def subscribe_keyboard() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        [
+            [InlineKeyboardButton("✅ I've Paid", callback_data="paid")],
+            [InlineKeyboardButton("⬅️ Back", callback_data="menu")],
+        ]
+    )
+
+
+async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    await update.message.reply_text(
+        WELCOME_TEXT, parse_mode=ParseMode.MARKDOWN, reply_markup=main_menu_keyboard()
+    )
+
+
+async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    query = update.callback_query
+    await query.answer()
+    data = query.data
+
+    if data == "menu":
+        await query.edit_message_text(
+            WELCOME_TEXT, parse_mode=ParseMode.MARKDOWN, reply_markup=main_menu_keyboard()
+        )
+        return
+
+    if data == "subscribe":
+        await query.edit_message_text(
+            SUBSCRIBE_TEXT, parse_mode=ParseMode.MARKDOWN, reply_markup=subscribe_keyboard()
+        )
+        return
+
+    if data == "paid":
+        user = query.from_user
+        username = f"@{user.username}" if user.username else user.full_name
+        await context.bot.send_message(
+            chat_id=ADMIN_CHAT_ID,
+            text=(
+                f"💵 Payment claim from {username} (id: {user.id}).\n"
+                "Check Cash App for a matching payment, then add "
+                "them to the picks group manually."
+            ),
+        )
+        await query.edit_message_text(
+            "Thanks! Your payment claim was sent for verification — "
+            "you'll get an invite to the private picks group shortly "
+            "once it's confirmed.",
+            reply_markup=InlineKeyboardMarkup(
+                [[InlineKeyboardButton("⬅️ Back to menu", callback_data="menu")]]
+            ),
+        )
+        return
+
+    if data.startswith("cat:"):
+        key = data.split(":", 1)[1]
+        cat = CATEGORIES.get(key)
+        if cat:
+            await query.edit_message_text(
+                cat["text"], parse_mode=ParseMode.MARKDOWN, reply_markup=category_keyboard()
+            )
+
+
+def main() -> None:
+    app = Application.builder().token(BOT_TOKEN).build()
+    app.add_handler(CommandHandler("start", start))
+    app.add_handler(CallbackQueryHandler(button_handler))
+    logger.info("Bot starting (polling)...")
+    app.run_polling()
+
+
+if __name__ == "__main__":
+    main()
